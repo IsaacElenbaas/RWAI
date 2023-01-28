@@ -6,14 +6,11 @@
 namespace RWAI {
 	[BepInEx.BepInPlugin("isaacelenbaas.rwai", "RWAI", "1.0.0")]
 
+	// TODO: check out SoundLoader to see if audio is at all possible
 	public class RWAI : BepInEx.BaseUnityPlugin {
 		const int frameBacklog = 20;
 		const int frameProcessorThreads = 3;
 		const float fpsMult = 1;
-
-		private bool record = true;
-		// just in case
-		private bool recordThis = false;
 
 		public void OnEnable() { On.RainWorld.OnModsInit += OnModsInit; }
 
@@ -49,6 +46,10 @@ namespace RWAI {
 		}
 
 /*{{{ recording*/
+		private bool record = true;
+		// just in case
+		private bool recordThis = false;
+
 		private void ProcessManager_Update(On.ProcessManager.orig_Update orig, ProcessManager self, float deltaTime) {
 			// I would like to change this to 1 along with targetFrameRate, but it is set in a couple of places
 			// I don't care *that* much about one dropped/extra frame every once in a while
