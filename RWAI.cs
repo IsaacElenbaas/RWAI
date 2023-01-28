@@ -8,20 +8,12 @@ namespace RWAI {
 
 	public class RWAI : BepInEx.BaseUnityPlugin {
 		const int frameBacklog = 20;
+		const int frameProcessorThreads = 3;
+		const float fpsMult = 1;
 
 		private bool record = true;
 		// just in case
 		private bool recordThis = false;
-
-		Unity.Collections.NativeArray<byte>[] availableFrames = new Unity.Collections.NativeArray<byte>[frameBacklog];
-		UnityEngine.RenderTexture[] availableFrameBuffers = new UnityEngine.RenderTexture[frameBacklog];
-		System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>> queuedFrames = new System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>>();
-		System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest> queuedFrameRequests = new System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest>();
-		System.Threading.Semaphore availableFramesSem = new System.Threading.Semaphore(0, frameBacklog);
-		System.Threading.Semaphore    queuedFramesSem = new System.Threading.Semaphore(0, frameBacklog);
-		int queuedSemCount = 0;
-		uint skipQueuedSemRelease = 0;
-		System.Threading.Mutex frameMut = new System.Threading.Mutex();
 
 		public void OnEnable() { On.RainWorld.OnModsInit += OnModsInit; }
 
@@ -37,15 +29,12 @@ namespace RWAI {
 				On.RoomCamera.DrawUpdate += RoomCamera_DrawUpdate;
 				//On.RWInput.PlayerInput += RWInput_PlayerInput;
 				self.StartCoroutine(CaptureFrames());
-				(new System.Threading.Thread(ProcessFrames)).Start();
+				ProcessFramesInit();
+				for(int i = 0; i < frameProcessorThreads; i++) {
+					(new System.Threading.Thread(ProcessFrames)).Start();
+				}
 			}
 			catch {}
-		}
-
-		private void ProcessManager_Update(On.ProcessManager.orig_Update orig, ProcessManager self, float deltaTime) {
-			// I would like to change this to 1 along with targetFrameRate, but it is set in a couple of places
-			// I don't care *that* much about one dropped/extra frame every once in a while
-			orig(self, 1f/20);
 		}
 
 		private System.Net.Sockets.NetworkStream ipc;
@@ -59,16 +48,36 @@ namespace RWAI {
 			ipc.Write(data, 0, data.Length);
 		}
 
+/*{{{ recording*/
+		private void ProcessManager_Update(On.ProcessManager.orig_Update orig, ProcessManager self, float deltaTime) {
+			// I would like to change this to 1 along with targetFrameRate, but it is set in a couple of places
+			// I don't care *that* much about one dropped/extra frame every once in a while
+			orig(self, 1f/20/fpsMult);
+		}
+
 		private void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed) {
 			if(!record) return;
 			orig(self, timeStacker, timeSpeed);
 			recordThis = true;
 		}
 
+	/*{{{ variables*/
 		bool initFrame = true;
 		UnityEngine.Experimental.Rendering.GraphicsFormat frameFormat;
 		int frameWidth;
 		int frameHeight;
+		Unity.Collections.NativeArray<byte>[] availableFrames = new Unity.Collections.NativeArray<byte>[frameBacklog];
+		UnityEngine.RenderTexture[] availableFrameBuffers = new UnityEngine.RenderTexture[frameBacklog];
+		System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>> queuedFrames = new System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>>();
+		System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest> queuedFrameRequests = new System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest>();
+		System.Threading.Semaphore availableFramesSem = new System.Threading.Semaphore(0, frameBacklog);
+		System.Threading.Semaphore    queuedFramesSem = new System.Threading.Semaphore(0, frameBacklog);
+		int queuedSemCount = 0;
+		int skipQueuedSemRelease = 0;
+		System.Threading.Mutex frameMut = new System.Threading.Mutex();
+	/*}}}*/
+
+	/*{{{ IEnumerator CaptureFrames()*/
 		System.Collections.IEnumerator CaptureFrames() {
 			UnityEngine.RenderTexture tempFrameBuffer = new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0);
 			UnityEngine.Vector2 scale  = new UnityEngine.Vector2(1, -1);
@@ -122,31 +131,50 @@ namespace RWAI {
 			}
 			else skipQueuedSemRelease--;
 		}
+	/*}}}*/
+
+	/*{{{ void ProcessFrames()*/
+		System.Threading.Mutex threadMut = new System.Threading.Mutex();
+		System.Threading.Semaphore[] writeFrameSems = new System.Threading.Semaphore[frameProcessorThreads];
+		private void ProcessFramesInit() {
+			writeFrameSems[0] = new System.Threading.Semaphore(1, 1);
+			for(int i = 1; i < frameProcessorThreads; i++) {
+				writeFrameSems[i] = new System.Threading.Semaphore(0, 1);
+			}
+		}
+		int writeFrameSemsIndex = 0;
 		private void ProcessFrames() {
 			while(true) {
 				queuedFramesSem.WaitOne();
 				System.Threading.Interlocked.Decrement(ref queuedSemCount);
 				UnityEngine.Rendering.AsyncGPUReadbackRequest request;
-				while(queuedFrameRequests.TryPeek(out request) && request.done) {
+				threadMut.WaitOne();
+				if(queuedFrameRequests.TryPeek(out request) && request.done) {
 					Unity.Collections.NativeArray<byte> frame;
 					frameMut.WaitOne();
 					queuedFrames.TryDequeue(out frame);
 					queuedFrameRequests.TryDequeue(out request);
 					frameMut.ReleaseMutex();
+					int writeFrameSemIndex = writeFrameSemsIndex;
+					writeFrameSemsIndex = (writeFrameSemsIndex+1)%frameProcessorThreads;
+					threadMut.ReleaseMutex();
 					// hasError is toggled after one frame, see AsyncGPUReadbackRequest docs
 					// data should be Disposed of at that point but I have set as persistent
-					// try was necessary when using GetData (just dropped frames) but seems good with queuedFrames
+					// a try catch was necessary when using GetData (just dropped frames) but seems good with queuedFrames
 					//WriteIPC(request.hasError ? "BAD\n" : "GOOD\n");
-					//try {
 					Unity.Collections.NativeArray<byte> nativeData = UnityEngine.ImageConversion.EncodeNativeArrayToJPG(frame, frameFormat, (uint)frameWidth, (uint)frameHeight, quality:100);
 					byte[] data = nativeData.ToArray();
+					availableFramesSem.Release();
+					writeFrameSems[writeFrameSemIndex].WaitOne();
+					writeFrameSems[(writeFrameSemIndex+1)%frameProcessorThreads].Release();
 					ipc.Write(data, 0, data.Length);
 					nativeData.Dispose();
-					//} catch {}
-					availableFramesSem.Release();
 				}
+				else threadMut.ReleaseMutex();
 			}
 		}
+	/*}}}*/
+/*}}}*/
 
 		private Player.InputPackage RWInput_PlayerInput(On.RWInput.orig_PlayerInput orig, RainWorld self, int playerNumber) {
 			float x = 1;
