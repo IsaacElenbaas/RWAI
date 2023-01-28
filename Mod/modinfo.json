@@ -1,0 +1,11 @@
+{
+	"id": "isaacelenbaas_rwai",
+	"name": "RWAI",
+	"version": "1.0.0",
+	"target_game_version": "v1.9.0",
+	"authors": "IsaacElenbaas",
+	"description": "Hopefully this thing is better than me",
+	"requirements": [],
+	"requirements_names": [],
+	"checksum_override_version": false
+}

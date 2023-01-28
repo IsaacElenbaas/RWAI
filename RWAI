@@ -1,0 +1,3 @@
+#!/bin/bash
+
+./RWAIVideo | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4
