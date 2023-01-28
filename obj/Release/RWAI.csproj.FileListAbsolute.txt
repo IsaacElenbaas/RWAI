@@ -1,6 +1,0 @@
-/home/isaacelenbaas/Projects/RemixMods/RWAI/obj/Release/RWAI.csproj.AssemblyReference.cache
-/home/isaacelenbaas/Projects/RemixMods/RWAI/obj/Release/RWAI.csproj.CoreCompileInputs.cache
-/home/isaacelenbaas/Projects/RemixMods/RWAI/bin/Release/RWAI.dll
-/home/isaacelenbaas/Projects/RemixMods/RWAI/bin/Release/RWAI.pdb
-/home/isaacelenbaas/Projects/RemixMods/RWAI/obj/Release/RWAI.dll
-/home/isaacelenbaas/Projects/RemixMods/RWAI/obj/Release/RWAI.pdb

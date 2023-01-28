@@ -7,6 +7,7 @@ namespace RWAI {
 	[BepInEx.BepInPlugin("isaacelenbaas.rwai", "RWAI", "1.0.0")]
 
 	public class RWAI : BepInEx.BaseUnityPlugin {
+		// TODO
 		const int frameBacklog = 1;
 
 		private bool record = true;
@@ -16,7 +17,8 @@ namespace RWAI {
 		System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>> availableFrames = new System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>>();
 		System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest> queuedFrames = new System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest>();
 		System.Threading.Semaphore availableFramesSem = new System.Threading.Semaphore(0, frameBacklog);
-		System.Threading.Semaphore    queuedFramesSem = new System.Threading.Semaphore(0, frameBacklog);
+		System.Threading.Semaphore    queuedFramesSem = new System.Threading.Semaphore(0, frameBacklog+1);
+		uint skipQueuedSemRelease = 0;
 
 		public void OnEnable() { On.RainWorld.OnModsInit += OnModsInit; }
 
@@ -59,9 +61,16 @@ namespace RWAI {
 			recordThis = true;
 		}
 
-		UnityEngine.RenderTexture frameBuffer = new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0);
+		bool initFrame = true;
 		UnityEngine.Experimental.Rendering.GraphicsFormat frameFormat;
+		int frameWidth;
+		int frameHeight;
+		// TODO: move, take from pool somehow? not sure how to know when one's done
+		UnityEngine.RenderTexture frameBuffer = new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0);
 		System.Collections.IEnumerator CaptureFrames() {
+			UnityEngine.RenderTexture tempFrameBuffer = new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0);
+			UnityEngine.Vector2 scale  = new UnityEngine.Vector2(1, -1);
+			UnityEngine.Vector2 offset = new UnityEngine.Vector2(0, 1);
 			// TODO: Maybe Screen.currentResolution or something else instead?
 			for(int i = 0; i < frameBacklog; i++) {
 				availableFrames.Enqueue(new Unity.Collections.NativeArray<byte>(UnityEngine.Screen.currentResolution.width*UnityEngine.Screen.currentResolution.height*4, Unity.Collections.Allocator.Persistent, Unity.Collections.NativeArrayOptions.UninitializedMemory));
@@ -78,11 +87,17 @@ namespace RWAI {
 					// the reason for this weirdness - where this normally happens won't if this thread is waiting on availableFramesSem
 					// would cause deadlock, WaitForCompletion might be enough to prevent it but not trusting and doing this
 					queuedFramesSem.Release();
+					skipQueuedSemRelease++;
+				}
+				UnityEngine.ScreenCapture.CaptureScreenshotIntoRenderTexture(tempFrameBuffer);
+				UnityEngine.Graphics.Blit(tempFrameBuffer, frameBuffer, scale, offset);
+				if(initFrame) {
+					initFrame = false;
+					frameFormat = frameBuffer.graphicsFormat;
+					frameWidth = frameBuffer.width; frameHeight = frameBuffer.height;
 				}
 				availableFramesSem.WaitOne();
 				Unity.Collections.NativeArray<byte> frame; availableFrames.TryDequeue(out frame);
-				UnityEngine.ScreenCapture.CaptureScreenshotIntoRenderTexture(frameBuffer);
-				frameFormat = frameBuffer.graphicsFormat;
 				//UnityEngine.Rendering.CommandBuffer cb = new UnityEngine.Rendering.CommandBuffer();
 				//cb.RequestAsyncReadbackIntoNativeArray(ref frame, frameBuffer, 0, FrameAvailable);
 				//UnityEngine.Graphics.ExecuteCommandBuffer(cb);
@@ -90,7 +105,9 @@ namespace RWAI {
 			}
 		}
 		private void FrameAvailable(UnityEngine.Rendering.AsyncGPUReadbackRequest request) {
-			queuedFramesSem.Release();
+			if(skipQueuedSemRelease == 0)
+				queuedFramesSem.Release();
+			else skipQueuedSemRelease--;
 		}
 		private void ProcessFrames() {
 			while(true) {
@@ -99,13 +116,10 @@ namespace RWAI {
 				while(queuedFrames.TryPeek(out request) && request.done) {
 					queuedFrames.TryDequeue(out request);
 					Unity.Collections.NativeArray<byte> frame = request.GetData<byte>();
-					//Logger.LogInfo("TEST ");
-					//Logger.LogInfo(frame.Length);
-					//Unity.Collections.NativeArray<byte> curFrame = new Unity.Collections.NativeArray<byte>(UnityEngine.Screen.currentResolution.width*UnityEngine.Screen.currentResolution.height*4, Unity.Collections.Allocator.Persistent, Unity.Collections.NativeArrayOptions.UninitializedMemory);
-					//Unity.Collections.NativeArray<byte>.Copy(frame, curFrame);
-					//UnityEngine.ImageConversion.EncodeNativeArrayToPNG(curFrame, frameFormat, frameWidth, frameHeight);
-					//byte[] data = UnityEngine.ImageConversion.EncodeNativeArrayToJPG(frame, frameFormat, (uint)UnityEngine.Screen.currentResolution.width, (uint)UnityEngine.Screen.currentResolution.height, quality:100).ToArray();
-					//ipc.Write(data, 0, data.Length);
+					Unity.Collections.NativeArray<byte> nativeData = UnityEngine.ImageConversion.EncodeNativeArrayToJPG(frame, frameFormat, (uint)frameWidth, (uint)frameHeight, quality:100);
+					byte[] data = nativeData.ToArray();
+					ipc.Write(data, 0, data.Length);
+					nativeData.Dispose();
 					availableFrames.Enqueue(frame);
 					availableFramesSem.Release();
 				}
