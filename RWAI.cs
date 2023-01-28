@@ -13,8 +13,8 @@ namespace RWAI {
 		// just in case
 		private bool recordThis = false;
 
-		System.Collections.Generic.Queue<Unity.Collections.NativeArray<byte>> availableFrames = new System.Collections.Generic.Queue<Unity.Collections.NativeArray<byte>>();
-		System.Collections.Generic.Queue<UnityEngine.RenderTexture> availableFrameBuffers = new System.Collections.Generic.Queue<UnityEngine.RenderTexture>();
+		Unity.Collections.NativeArray<byte>[] availableFrames = new Unity.Collections.NativeArray<byte>[frameBacklog];
+		UnityEngine.RenderTexture[] availableFrameBuffers = new UnityEngine.RenderTexture[frameBacklog];
 		System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>> queuedFrames = new System.Collections.Concurrent.ConcurrentQueue<Unity.Collections.NativeArray<byte>>();
 		System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest> queuedFrameRequests = new System.Collections.Concurrent.ConcurrentQueue<UnityEngine.Rendering.AsyncGPUReadbackRequest>();
 		System.Threading.Semaphore availableFramesSem = new System.Threading.Semaphore(0, frameBacklog);
@@ -75,11 +75,11 @@ namespace RWAI {
 			UnityEngine.Vector2 offset = new UnityEngine.Vector2(0, 1);
 			// TODO: Maybe Screen.currentResolution or something else instead?
 			for(int i = 0; i < frameBacklog; i++) {
-				availableFrames.Enqueue(new Unity.Collections.NativeArray<byte>(UnityEngine.Screen.currentResolution.width*UnityEngine.Screen.currentResolution.height*4, Unity.Collections.Allocator.Persistent, Unity.Collections.NativeArrayOptions.UninitializedMemory));
-				availableFrameBuffers.Enqueue(new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0));
+				availableFrames[i] = new Unity.Collections.NativeArray<byte>(UnityEngine.Screen.currentResolution.width*UnityEngine.Screen.currentResolution.height*4, Unity.Collections.Allocator.Persistent, Unity.Collections.NativeArrayOptions.UninitializedMemory);
+				availableFrameBuffers[i] = new UnityEngine.RenderTexture(UnityEngine.Screen.currentResolution.width, UnityEngine.Screen.currentResolution.height, 0);
 				availableFramesSem.Release();
 			}
-			while(true) {
+			for(int i = 0; true; i = (i+1)%frameBacklog) {
 				yield return new UnityEngine.WaitForEndOfFrame();
 				if(!recordThis) continue;
 				recordThis = false;
@@ -103,10 +103,8 @@ namespace RWAI {
 				}
 				UnityEngine.ScreenCapture.CaptureScreenshotIntoRenderTexture(tempFrameBuffer);
 				availableFramesSem.WaitOne();
-				Unity.Collections.NativeArray<byte> frame = availableFrames.Dequeue();
-				UnityEngine.RenderTexture frameBuffer = availableFrameBuffers.Dequeue();
-				availableFrames.Enqueue(frame);
-				availableFrameBuffers.Enqueue(frameBuffer);
+				Unity.Collections.NativeArray<byte> frame = availableFrames[i];
+				UnityEngine.RenderTexture frameBuffer = availableFrameBuffers[i];
 				if(initFrame) {
 					initFrame = false;
 					frameFormat = frameBuffer.graphicsFormat;
