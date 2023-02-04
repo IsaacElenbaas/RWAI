@@ -1,3 +1,9 @@
 #!/bin/bash
 
-./Video | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4
+set -e
+gcc Video.c -o Video
+gcc AI.c -o AI
+[ -z "$1" ] && {
+	./Video | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4 &>/dev/null &
+}
+./AI
