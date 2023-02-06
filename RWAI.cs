@@ -1,12 +1,11 @@
-﻿#define NOHOOKINPUT
+﻿//#define NOHOOKINPUT
 
 using System;
 
-[module: System.Security.UnverifiableCode]
 [assembly: System.Security.Permissions.SecurityPermission(System.Security.Permissions.SecurityAction.RequestMinimum, SkipVerification = true)]
 
 namespace RWAI {
-	[BepInEx.BepInPlugin("isaacelenbaas.rwai", "RWAI", "1.0.0")]
+	[BepInEx.BepInPlugin("com.isaacelenbaas.rwai", "RWAI", "1.0.0")]
 
 	// TODO: check out Room.PlaySound (or SoundLoader?) to see if audio is at all possible
 	public class RWAI : BepInEx.BaseUnityPlugin {
@@ -19,13 +18,17 @@ namespace RWAI {
 
 		// TODO: set to true so loads in random room?
 		bool justDied = false;
+		int deathCooldown = 0;
 		bool sendData = true;
 
 /*{{{ init*/
+		public void Awake() { On.RainWorld.OnModsInit += OnModsInit; }
 		public void OnEnable() { On.RainWorld.OnModsInit += OnModsInit; }
+		static bool initialized = false;
 		private void OnModsInit(On.RainWorld.orig_OnModsInit orig, RainWorld self) {
-			if(enemyVision/2 != enemyVision/2.0) throw new ArgumentException("RWAI: enemyVision must be divisible by two");
 			orig(self);
+			if(initialized) return; initialized = true;
+			if(enemyVision/2 != enemyVision/2.0) throw new ArgumentException("RWAI: enemyVision must be divisible by two");
 			try {
 				System.Net.Sockets.TcpClient ipcClient = new System.Net.Sockets.TcpClient("127.0.0.1", 8319);
 				ipc = ipcClient.GetStream();
@@ -77,13 +80,14 @@ namespace RWAI {
 			Byte[] data = System.Text.Encoding.ASCII.GetBytes(text);
 			if(lastWrite != null) await lastWrite;
 			// WriteAsync does not start until awaited
+			// TODO: I'm not actually certain this ensures they arrive in the correct order, at least without a newline
 			lastWrite = System.Threading.Tasks.Task.Run(() => ipc.Write(data, 0, data.Length));
-			ipc.Write(data, 0, data.Length);
 		}
 /*}}}*/
 
 		private void RoomCamera_ApplyPositionChange(On.RoomCamera.orig_ApplyPositionChange orig, RoomCamera self) {
 			orig(self);
+			if(teleport == 1) teleport = 2;
 			System.Text.StringBuilder data = new System.Text.StringBuilder();
 			data.Append("R" + self.room.abstractRoom.name +
 				"|" + self.room.Width + "x" + self.room.Height +
@@ -109,12 +113,13 @@ namespace RWAI {
 			WriteIPC(data.ToString());
 		}
 
+		int teleport = 0;
 		private void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed) {
 			if(sendData) {
+				if(deathCooldown > 0) deathCooldown--;
 				System.Text.StringBuilder data = new System.Text.StringBuilder();
 				// TODO: make teleport spawn in random region as well
-				// TODO: make teleport spawn in random place in room
-				// TODO: ML side
+				// TODO: pathfinder, ML side
 
 				// TODO: see DirectionFinder class
 				// TODO: there's HitByWeapon and Violence triggers for most things, could hook Creature's maybe?
@@ -131,11 +136,7 @@ namespace RWAI {
 					throw new ArgumentException("RWAI: death was not caught");
 				}
 				if(justDied || player.dangerGrasp != null) {
-					if(player.spearOnBack != null && player.spearOnBack.spear != null) player.spearOnBack.DropSpear();
-					player.LoseAllGrasps();
-					player.Regurgitate();
-					if(player.spearOnBack != null) player.spearOnBack.SpearToHand(true);
-					player.LoseAllGrasps();
+					justDied = false;
 					foreach(Creature.Grasp g in new System.Collections.Generic.List<Creature.Grasp>(player.grabbedBy)) {
 						g.grabber.LoseAllGrasps();
 					}
@@ -148,7 +149,14 @@ namespace RWAI {
 					// TODO: doesn't look like this will make things come back out of dens, but good enough for initial training
 					//       (also doesn't actually stop the rain if it has started)
 					//       going to hard cut off long before that to reward/punish
-					player.room.world.rainCycle.timer = 0;
+					self.room.world.rainCycle.timer = 0;
+					if(player.spearOnBack != null && player.spearOnBack.spear != null) player.spearOnBack.DropSpear();
+					player.LoseAllGrasps();
+					player.Regurgitate();
+					if(player.spearOnBack != null) player.spearOnBack.SpearToHand(true);
+					player.LoseAllGrasps();
+					if(deathCooldown > 0) return;
+					else deathCooldown = 40;
 					WorldCoordinate origin;
 					if(player.room != null) {
 						origin = (self.game.Players[0] as AbstractCreature).pos;
@@ -156,16 +164,66 @@ namespace RWAI {
 						self.room.CleanOutObjectNotInThisRoom(player);
 					}
 					else origin = new WorldCoordinate();
-					AbstractRoom room = self.room.world.abstractRooms[(new Random()).Next(0, self.room.world.abstractRooms.Length)];
+					AbstractRoom room = self.room.world.abstractRooms[(new Random()).Next(self.room.world.abstractRooms.Length)];
+					while(room == self.room.abstractRoom || room.offScreenDen || room.connections.Length <= 0 || room.name.Contains("GATE")) {
+						room = self.room.world.abstractRooms[(self.room.world.abstractRooms.IndexOf(room)+1)%self.room.world.abstractRooms.Length];
+					}
 					self.game.shortcuts.CreatureTeleportOutOfRoom(player, origin, new WorldCoordinate(room.index, -1, -1, 0));
-					justDied = false;
+					teleport = 1;
 					return;
 				}
-				if(player.room != null) {
-					data.Append("R" + player.room.world.rainCycle.cycleLength +
-					            "," + player.room.world.rainCycle.timer +
-					"\n");
+				if(player.room != null && teleport == 2) {
+					teleport = 0;
+
+/*{{{ teleport to random coordinate in room*/
+					int[] tiles = new int[self.room.Width*self.room.Height];
+					for(int i = 0; i < tiles.Length; i++) { tiles[i] = i; }
+					Random tileRand = new Random();
+					for(int i = 0; i < tiles.Length; i++) {
+						int j = tileRand.Next(0, tiles.Length);
+						(tiles[i], tiles[j]) = (tiles[j], tiles[i]);
+					}
+					int teleportTile = -1;
+					foreach(int tile in tiles) {
+						Room.Tile tileTile = self.room.Tiles[tile%self.room.Width, tile/self.room.Width];
+						if(tileTile.Terrain != Room.Tile.TerrainType.Solid &&
+						   tileTile.Terrain != Room.Tile.TerrainType.Floor &&
+						   tileTile.Terrain != Room.Tile.TerrainType.Slope
+						) continue;
+						bool good = true;
+						for(int j = 1; j <= 3; j++) {
+							if(tile/self.room.Width+j >= self.room.Height) {
+								good = false; break;
+							}
+							for(int i = -1; i <= 1; i++) {
+								if(tile%self.room.Width+i < 0 || tile%self.room.Width+i >= self.room.Width) {
+									good = false; break;
+								}
+								Room.Tile tileTile2 = self.room.Tiles[tile%self.room.Width+i, tile/self.room.Width+j];
+								if(tileTile2.Terrain == Room.Tile.TerrainType.Solid ||
+								   tileTile2.Terrain == Room.Tile.TerrainType.Floor ||
+								   tileTile2.Terrain == Room.Tile.TerrainType.Slope
+								) {
+									good = false; break;
+								}
+								// backup plan
+								teleportTile = tile+i+j*self.room.Width;
+							}
+							if(!good) break;
+						}
+						if(good) {
+							teleportTile = tile+2*self.room.Width;
+							break;
+						}
+					}
+					if(teleportTile == -1) throw new ArgumentException("RWAI: " + self.room.abstractRoom.name + " has no air");
+					player.SuperHardSetPosition(self.room.MiddleOfTile(teleportTile%self.room.Width, teleportTile/self.room.Width));
+/*}}}*/
+
 				}
+				data.Append("T" + self.room.world.rainCycle.cycleLength +
+				            "," + self.room.world.rainCycle.timer +
+				"\n");
 
 				// TODO: give time in room so can boost out of pipes, 0 to 1 with 1=60s or smth
 				//       can calculate in C by time since last room message
@@ -181,6 +239,7 @@ namespace RWAI {
 				// jumping is 10.18 on first frame
 				// jump stored QCTJ is still only 14, just stays high for long
 				// TODO: TL;DR will have to give bonus points for movement by cumulative over the last three seconds or smth
+				//       give for both displacement and average speed over that time
 				// blocks - 0,0 is bottom left, set to -1,-1 when in pipe
 				data.Append("P" + player.coord.x + "," + player.coord.y +
 				// pos and vel are in pixels - 0,0 is bottom left
@@ -314,7 +373,7 @@ namespace RWAI {
 					};
 	/*}}}*/
 
-					foreach(AbstractCreature c in player.room.abstractRoom.creatures) {
+					foreach(AbstractCreature c in self.room.abstractRoom.creatures) {
 						if(c == player.abstractCreature ||
 						   c.realizedCreature == null ||
 						   c.realizedCreature.Template.type == CreatureTemplate.Type.Overseer
@@ -338,7 +397,7 @@ namespace RWAI {
 							}
 						}
 					}
-					foreach(AbstractWorldEntity e in player.room.abstractRoom.entities) {
+					foreach(AbstractWorldEntity e in self.room.abstractRoom.entities) {
 						if(!(e is AbstractPhysicalObject) || (e as AbstractPhysicalObject).realizedObject == null) continue;
 						if(e is AbstractConsumable &&
 						   (e as AbstractConsumable).realizedObject is IPlayerEdible &&
@@ -512,7 +571,10 @@ namespace RWAI {
 /*}}}*/
 
 /*{{{ PlayerInput*/
-		private Player.InputPackage RWInput_PlayerInput(On.RWInput.orig_PlayerInput orig, RainWorld self, int playerNumber) {
+		private Player.InputPackage RWInput_PlayerInput(On.RWInput.orig_PlayerInput orig, int playerNumber, RainWorld rainWorld) {
+			Player.InputPackage actual = orig(playerNumber, rainWorld);
+			if(actual.thrw) justDied = true;
+			return actual;
 			float x = 1;
 			float y = 0;
 			Player.InputPackage inputs = new Player.InputPackage(
@@ -555,9 +617,7 @@ namespace RWAI {
 			else orig(self, obj);
 		}
 		private void AbstractRoom_MoveEntityToDen(On.AbstractRoom.orig_MoveEntityToDen orig, AbstractRoom self, AbstractWorldEntity ent) {
-			if(ent is AbstractCreature && (ent as AbstractCreature).realizedCreature is Player)
-				// TODO
-				justDied = true;
+			if(ent is AbstractCreature && (ent as AbstractCreature).realizedCreature is Player) justDied = true;
 			else orig(self, ent);
 		}
 		private void PhysicalObject_Update(On.PhysicalObject.orig_Update orig, PhysicalObject self, bool eu) {
