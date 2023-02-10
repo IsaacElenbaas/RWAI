@@ -8,18 +8,20 @@ namespace RWAI {
 	[BepInEx.BepInPlugin("com.isaacelenbaas.rwai", "RWAI", "1.0.0")]
 
 	// TODO: check out Room.PlaySound (or SoundLoader?) to see if audio is at all possible
+	// TODO: see Custom.BetweenRoomsDistance
 	public class RWAI : BepInEx.BaseUnityPlugin {
 		const int frameBacklog = 20;
 		const int frameProcessorThreads = 3;
 		const float fpsMult = 1;
-		const int enemyVision = 40; // centered on slugcat - 20 blocks in any direction
-		const int  foodVision = 20; // centered on slugcat - 10 blocks in any direction
-		const int  itemVision = 20; // centered on slugcat - 10 blocks in any direction
+		const int creatureVision = 40; // centered on slugcat - 20 blocks in any direction
+		const int     foodVision = 20; // centered on slugcat - 10 blocks in any direction
+		const int     itemVision = 20; // centered on slugcat - 10 blocks in any direction
 
 		// TODO: set to true so loads in random room?
 		bool justDied = false;
 		int deathCooldown = 0;
 		bool sendData = true;
+		bool pauseData = false;
 
 /*{{{ init*/
 		public void Awake() { On.RainWorld.OnModsInit += OnModsInit; }
@@ -28,7 +30,9 @@ namespace RWAI {
 		private void OnModsInit(On.RainWorld.orig_OnModsInit orig, RainWorld self) {
 			orig(self);
 			if(initialized) return; initialized = true;
-			if(enemyVision/2 != enemyVision/2.0) throw new ArgumentException("RWAI: enemyVision must be divisible by two");
+			if(creatureVision/2 != creatureVision/2.0) throw new ArgumentException("RWAI: creatureVision must be divisible by two");
+			if(    foodVision/2 !=     foodVision/2.0) throw new ArgumentException("RWAI: foodVision must be divisible by two");
+			if(    itemVision/2 !=     itemVision/2.0) throw new ArgumentException("RWAI: itemVision must be divisible by two");
 			try {
 				System.Net.Sockets.TcpClient ipcClient = new System.Net.Sockets.TcpClient("127.0.0.1", 8319);
 				ipc = ipcClient.GetStream();
@@ -80,8 +84,9 @@ namespace RWAI {
 			Byte[] data = System.Text.Encoding.ASCII.GetBytes(text);
 			if(lastWrite != null) await lastWrite;
 			// WriteAsync does not start until awaited
-			// TODO: I'm not actually certain this ensures they arrive in the correct order, at least without a newline
-			lastWrite = System.Threading.Tasks.Task.Run(() => ipc.Write(data, 0, data.Length));
+			// TODO: this doesn't actually ensure they arrive in the correct order, even with newlines
+			//lastWrite = System.Threading.Tasks.Task.Run(() => ipc.Write(data, 0, data.Length));
+			ipc.Write(data, 0, data.Length);
 		}
 /*}}}*/
 
@@ -89,36 +94,80 @@ namespace RWAI {
 			orig(self);
 			if(teleport == 1) teleport = 2;
 			System.Text.StringBuilder data = new System.Text.StringBuilder();
-			data.Append("R" + self.room.abstractRoom.name +
-				"|" + self.room.Width + "x" + self.room.Height +
-				"|" + ((self.room.water) ? self.room.defaultWaterLevel.ToString() : "0")
+			data.Append('R' + self.room.abstractRoom.name +
+				'|' + self.room.Width + 'x' + self.room.Height +
+				'|' + ((self.room.water) ? self.room.defaultWaterLevel.ToString() : "0") +
+				// TODO: improve
+				'|' + ((self.room.gravity == 0) ? '1' : '0')
 			);
 			// positive x is right, positive y is up
 			// default is -143, -52
-			//data.Append("|" + self.pos.x + "," + self.pos.y);
-			data.Append("|");
+			//data.Append('|' + self.pos.x + ',' + self.pos.y);
+			data.Append('|');
 			for(int j = 0; j < self.room.Height; j++) {
 				for(int i = 0; i < self.room.Width; i++) {
 					Room.Tile tile = self.room.Tiles[i, j];
 					data.Append(
-						  (tile.Terrain == Room.Tile.TerrainType.Solid ||
-						   tile.Terrain == Room.Tile.TerrainType.Floor) ? '1'
-						: (tile.Terrain == Room.Tile.TerrainType.Slope) ? '2'
-						: (tile.AnyBeam)                                ? '3'
+						  (tile.Terrain == Room.Tile.TerrainType.Solid && tile.shortCut == 0)            ? '2'
+						: (tile.Terrain == Room.Tile.TerrainType.Floor ||
+						   tile.Terrain == Room.Tile.TerrainType.Slope)                                  ? '1'
+						: (tile.AnyBeam ||
+						   tile.Terrain == Room.Tile.TerrainType.ShortcutEntrance || tile.shortCut != 0) ? '3'
 						: '0'
 					);
 				}
 			}
-			data.Append("\n");
+			data.Append('\n');
+			// fix self.room.shortcuts being null on initial load, isn't when going to new regions
+			while(!self.room.fullyLoaded) {
+				while(!self.game.world.loadingRooms[0].done) self.game.world.loadingRooms[0].Update();
+				self.game.world.loadingRooms.RemoveAt(0);
+				System.Threading.Thread.Sleep(1);
+			}
+			ShortcutData shortcut = self.room.shortcuts[(new Random()).Next(self.room.shortcuts.Length)];
+			RWCustom.IntVector2 vesselPos = shortcut.StartTile;
+			bool goodGoal = false;
+			while(!goodGoal) {
+				goodGoal = true;
+				while(shortcut.shortCutType != ShortcutData.Type.RoomExit) {
+					goodGoal = false;
+					shortcut = self.room.shortcuts[(Array.IndexOf(self.room.shortcuts, shortcut)+1)%self.room.shortcuts.Length];
+				}
+				// TODO: causes infinite loop when entering shelters and the odd dead-end room
+				if(self.room.world.game.Players[0].realizedCreature.inShortcut) {
+					System.Collections.Generic.List<ShortcutHandler.ShortCutVessel> transportVessels = self.room.world.game.shortcuts.transportVessels;
+					for(int i = transportVessels.Count-1; i >= 0; i--) {
+						if(transportVessels[i].creature is Player) {
+							// make sure we have a copy
+							vesselPos = new RWCustom.IntVector2(transportVessels[i].pos.x, transportVessels[i].pos.y);
+							RWCustom.IntVector2 lastVesselPos = vesselPos;
+							RWCustom.IntVector2 lastVesselPos2;
+							while(self.room.GetTile(vesselPos).Terrain != Room.Tile.TerrainType.ShortcutEntrance) {
+								lastVesselPos2 = vesselPos;
+								vesselPos = ShortcutHandler.NextShortcutPosition(vesselPos, lastVesselPos, self.room);
+								lastVesselPos = lastVesselPos2;
+							}
+							if(vesselPos.x == shortcut.StartTile.x && vesselPos.y == shortcut.StartTile.y) {
+								goodGoal = false;
+								shortcut = self.room.shortcuts[(Array.IndexOf(self.room.shortcuts, shortcut)+1)%self.room.shortcuts.Length];
+							}
+							break;
+						}
+					}
+				}
+			}
+			data.Append('S' + vesselPos.x.ToString() + ',' + vesselPos.y.ToString() + '|' + shortcut.StartTile.x.ToString() + ',' + shortcut.StartTile.y.ToString() + '\n');
 			WriteIPC(data.ToString());
+			pauseData = false;
 		}
 
 		int teleport = 0;
+		int regionCooldown = 0;
 		private void RoomCamera_DrawUpdate(On.RoomCamera.orig_DrawUpdate orig, RoomCamera self, float timeStacker, float timeSpeed) {
 			if(sendData) {
+				if(pauseData) return;
 				if(deathCooldown > 0) deathCooldown--;
 				System.Text.StringBuilder data = new System.Text.StringBuilder();
-				// TODO: make teleport spawn in random region as well
 				// TODO: pathfinder, ML side
 
 				// TODO: see DirectionFinder class
@@ -146,10 +195,9 @@ namespace RWAI {
 					player.lungsExhausted = false;
 					player.slowMovementStun = 0;
 					player.rainDeath = 0;
-					// TODO: doesn't look like this will make things come back out of dens, but good enough for initial training
-					//       (also doesn't actually stop the rain if it has started)
-					//       going to hard cut off long before that to reward/punish
-					self.room.world.rainCycle.timer = 0;
+					// TODO: need to see if this will make things come back out of dens
+					//       either way good enough for initial training, going to hard cut off long before that to reward/punish
+					self.game.globalRain.ResetRain();
 					if(player.spearOnBack != null && player.spearOnBack.spear != null) player.spearOnBack.DropSpear();
 					player.LoseAllGrasps();
 					player.Regurgitate();
@@ -157,18 +205,53 @@ namespace RWAI {
 					player.LoseAllGrasps();
 					if(deathCooldown > 0) return;
 					else deathCooldown = 40;
-					WorldCoordinate origin;
-					if(player.room != null) {
-						origin = (self.game.Players[0] as AbstractCreature).pos;
-						self.room.RemoveObject(player);
-						self.room.CleanOutObjectNotInThisRoom(player);
+					pauseData = true;
+					World world = self.game.world;
+					// try not to over-train on large regions (could be using number of rooms in new region)
+					if(regionCooldown < 20) {
+						regionCooldown++;
+						WorldCoordinate origin;
+						if(player.room != null) {
+							origin = (self.game.Players[0] as AbstractCreature).pos;
+							self.room.RemoveObject(player);
+							self.room.CleanOutObjectNotInThisRoom(player);
+						}
+						else origin = new WorldCoordinate();
+						AbstractRoom room = world.abstractRooms[(new Random()).Next(world.abstractRooms.Length)];
+						while(room == self.room.abstractRoom || room.offScreenDen || room.connections.Length <= 0 || room.name.Contains("GATE") || System.Text.RegularExpressions.Regex.Match(room.name, @"_S[0-9]").Success) {
+							room = world.abstractRooms[(world.abstractRooms.IndexOf(room)+1)%world.abstractRooms.Length];
+						}
+						if(room.realizedRoom == null) room.world.ActivateRoom(room);
+						self.game.shortcuts.CreatureTeleportOutOfRoom(player, origin, new WorldCoordinate(room.index, -1, -1, 0));
 					}
-					else origin = new WorldCoordinate();
-					AbstractRoom room = self.room.world.abstractRooms[(new Random()).Next(self.room.world.abstractRooms.Length)];
-					while(room == self.room.abstractRoom || room.offScreenDen || room.connections.Length <= 0 || room.name.Contains("GATE")) {
-						room = self.room.world.abstractRooms[(self.room.world.abstractRooms.IndexOf(room)+1)%self.room.world.abstractRooms.Length];
+					else {
+						regionCooldown = 0;
+						Region[] regions = self.game.overWorld.regions;
+						string target = regions[(regions.IndexOf(self.game.world.region)+1)%regions.Length].name;
+						self.game.overWorld.worldLoader = new WorldLoader(null, self.game.overWorld.PlayerCharacterNumber, false, target, self.game.overWorld.GetRegion(target), self.game.setupValues, WorldLoader.LoadingContext.FASTTRAVEL);
+						self.game.overWorld.worldLoader.NextActivity();
+						while(!self.game.overWorld.worldLoader.Finished) {
+							self.game.overWorld.worldLoader.Update();
+							System.Threading.Thread.Sleep(1);
+						}
+						AbstractRoom[] rooms = self.game.overWorld.worldLoader.ReturnWorld().abstractRooms;
+						AbstractRoom room = rooms[(new Random()).Next(rooms.Length)];
+						// warping into a shelter freezes the game (null exception in Player.Update)
+						while(room.offScreenDen || room.connections.Length <= 0 || room.name.Contains("GATE") || System.Text.RegularExpressions.Regex.Match(room.name, @"_S[0-9]").Success) {
+							room = rooms[(rooms.IndexOf(room)+1)%rooms.Length];
+						}
+						self.game.overWorld.reportBackToGate = null;
+						self.game.overWorld.specialWarpCallback = null;
+						self.game.overWorld.currentSpecialWarp = OverWorld.SpecialWarpType.WARP_SINGLEROOM;
+						self.game.overWorld.singleRoomWorldWarpGoal = room.name;
+						self.game.overWorld.worldLoader = new WorldLoader(self.game, self.game.overWorld.PlayerCharacterNumber, false, target, self.game.overWorld.GetRegion(target), self.game.setupValues);
+						self.game.overWorld.worldLoader.NextActivity();
+						// not necessary but why waste resources rendering?
+						while(!self.game.overWorld.worldLoader.Finished) {
+							self.game.overWorld.worldLoader.Update();
+							System.Threading.Thread.Sleep(1);
+						}
 					}
-					self.game.shortcuts.CreatureTeleportOutOfRoom(player, origin, new WorldCoordinate(room.index, -1, -1, 0));
 					teleport = 1;
 					return;
 				}
@@ -221,11 +304,14 @@ namespace RWAI {
 /*}}}*/
 
 				}
-				data.Append("T" + self.room.world.rainCycle.cycleLength +
-				            "," + self.room.world.rainCycle.timer +
-				"\n");
+				data.Append('T' + self.room.world.rainCycle.cycleLength.ToString() +
+				            ',' + self.room.world.rainCycle.timer.ToString() +
+				'\n');
 
-				// TODO: give time in room so can boost out of pipes, 0 to 1 with 1=60s or smth
+				// TODO: ShortCutVessel looks like it would be near what I need to give it time until comes out of pipe to learn to boost
+				//       see ShortcutHandler.Update CheckJumpButton
+				//       maybe current Vessel distance from dest
+				// TODO: give time in room, 0 to 1 with 1=60s or smth
 				//       can calculate in C by time since last room message
 				//       OOH, make that time pressure to get out! How long before killed and punished
 				//       then that can be the "explore or get moving" setting when making a run
@@ -241,18 +327,18 @@ namespace RWAI {
 				// TODO: TL;DR will have to give bonus points for movement by cumulative over the last three seconds or smth
 				//       give for both displacement and average speed over that time
 				// blocks - 0,0 is bottom left, set to -1,-1 when in pipe
-				data.Append("P" + player.coord.x + "," + player.coord.y +
+				data.Append('P' + player.coord.x.ToString() + ',' + player.coord.y.ToString() +
 				// pos and vel are in pixels - 0,0 is bottom left
 				// TODO: position on block might not be working - switches at 0.85 in y
 				//       alternatively, may be average position of body chunks as x seemed to not work when crawling
-				            "|" + ((player.mainBodyChunk.pos.x%20)/20).ToString("F3") + "," +
+				            '|' + ((player.mainBodyChunk.pos.x%20)/20).ToString("F3") + ',' +
 				                  ((player.mainBodyChunk.pos.y%20)/20).ToString("F3") +
-				            "|" + (player.mainBodyChunk.vel.x/20).ToString("F3") + "," +
+				            '|' + (player.mainBodyChunk.vel.x/20).ToString("F3") + ',' +
 				                  (player.mainBodyChunk.vel.y/20).ToString("F3")
 				);
 
 	/*{{{ bodyMode and animation*/
-				data.Append("|"); switch(player.bodyMode.value) {
+				data.Append('|'); switch(player.bodyMode.value) {
 					case "Default":           data.Append(0); break;
 					case "Crawl":             data.Append(1); break;
 					case "Stand":             data.Append(2); break;
@@ -265,7 +351,7 @@ namespace RWAI {
 					case "Stunned":           data.Append(9); break;
 					default: throw new ArgumentOutOfRangeException("RWAI: Unexpected bodyMode");
 				}
-				data.Append("|"); switch(player.animation.value) {
+				data.Append('|'); switch(player.animation.value) {
 					case "None":                  data.Append( 0); break;
 					case "CrawlTurn":             data.Append( 1); break;
 					case "StandUp":               data.Append( 2); break;
@@ -295,10 +381,10 @@ namespace RWAI {
 				}
 	/*}}}*/
 
-				data.Append("|" + player.airInLungs);
+				data.Append('|' + player.airInLungs.ToString());
 
 	/*{{{ stomach and grasped items*/
-				data.Append("|" + ((player.objectInStomach == null) ? 0 : 1));
+				data.Append('|' + ((player.objectInStomach == null) ? 0 : 1));
 				for(int i = 0; i < 2; i++) {
 					if(player.grasps[0] != null &&
 					   player.Grabability(player.grasps[0].grabbed) != Player.ObjectGrabability.OneHand &&
@@ -321,7 +407,7 @@ namespace RWAI {
 								(player.grasps[i].grabbed as Weapon).HeavyWeapon
 							)                                              ? 1
 							: 0
-						) + "," + (player.CanBeSwallowed(player.grasps[i].grabbed) ? 1 : 0));
+						) + ',' + (player.CanBeSwallowed(player.grasps[i].grabbed) ? 1 : 0));
 					}
 					else data.Append("|0,0,0");
 				}
@@ -345,15 +431,15 @@ namespace RWAI {
 				));
 	/*}}}*/
 
-				data.Append("|" + (player.MaxFoodInStomach-player.FoodInStomach));
-				data.Append("\n");
+				data.Append('|' + (player.MaxFoodInStomach-player.FoodInStomach).ToString());
+				data.Append('\n');
 /*}}}*/
 
 /*{{{ enemy, food, item vision*/
 				if(player.room != null) {
-					char[] enemyVisionOut = (new string('0', enemyVision*enemyVision)).ToCharArray();
-					char[]  foodVisionOut = (new string('0',  foodVision* foodVision)).ToCharArray();
-					char[]  itemVisionOut = (new string('0',  itemVision* itemVision)).ToCharArray();
+					char[] creatureVisionOut = (new string('0', creatureVision*creatureVision)).ToCharArray();
+					char[]     foodVisionOut = (new string('0',        foodVision* foodVision)).ToCharArray();
+					char[]     itemVisionOut = (new string('0',        itemVision* itemVision)).ToCharArray();
 
 	/*{{{ FillBodyChunk(BodyChunk b, char id, int vision, char[] dest)*/
 					Action<BodyChunk, char, int, char[]> FillBodyChunk = (b, id, vision, dest) => {
@@ -386,7 +472,7 @@ namespace RWAI {
 						}
 						if(dangerous || mass >= 0.35) {
 							foreach(BodyChunk b in c.realizedCreature.bodyChunks) {
-								FillBodyChunk(b, (!dangerous) ? '1' : '2', enemyVision, enemyVisionOut);
+								FillBodyChunk(b, (!dangerous) ? '1' : '2', creatureVision, creatureVisionOut);
 							}
 						}
 						if(c.realizedCreature.Template.type == CreatureTemplate.Type.Fly ||
@@ -423,16 +509,16 @@ namespace RWAI {
 						}
 					}
 					/*for(int i = itemVision-1; i >= 0; i--) {
-						data.Append((new string(itemVisionOut)).Substring(i*itemVision, itemVision) + "\n");
+						data.Append((new string(itemVisionOut)).Substring(i*itemVision, itemVision) + '\n');
 					}//*/
-					data.Append("C|" + new string(enemyVisionOut) + "\n");
-					data.Append("F|" + new string( foodVisionOut) + "\n");
-					data.Append("I|" + new string( itemVisionOut) + "\n");
+					data.Append("C|" + new string(creatureVisionOut) + '\n');
+					data.Append("F|" + new string(    foodVisionOut) + '\n');
+					data.Append("I|" + new string(    itemVisionOut) + '\n');
 				}
 				else data.Append("C-\nF-\nI-\n");
 /*}}}*/
 
-				WriteIPC(data.ToString());
+				WriteIPC(data.ToString() + "-\n");
 #if !NOHOOKINPUT
 				sendData = false;
 #endif
@@ -574,6 +660,7 @@ namespace RWAI {
 		private Player.InputPackage RWInput_PlayerInput(On.RWInput.orig_PlayerInput orig, int playerNumber, RainWorld rainWorld) {
 			Player.InputPackage actual = orig(playerNumber, rainWorld);
 			if(actual.thrw) justDied = true;
+			sendData = true;
 			return actual;
 			float x = 1;
 			float y = 0;

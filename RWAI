@@ -1,9 +1,8 @@
 #!/bin/bash
 
 set -e
-gcc Video.c -o Video
-gcc AI.c -o AI
+make
 [ -z "$1" ] && {
-	./Video | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4 &>/dev/null &
+	./video | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4 &>/dev/null &
 }
 ./AI
