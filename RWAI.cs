@@ -153,7 +153,7 @@ namespace RWAI {
 			Player player = game.Players[0].realizedCreature as Player;
 			// TODO: need to see if this will make things come back out of dens
 			//       either way good enough for initial training, going to hard cut off long before that to reward/punish
-			// TODO: can cause NullReferenceException at start, either don't justDied at start or do the first warp more intentionally
+			// TODO: can cause NullReferenceException at start, either don't JustDied at start (caused by RoomCamera.ApplyPositionChange) or do the first warp more intentionally
 			game.globalRain.ResetRain();
 			ResetDeath(player);
 			if(deathCooldown > 0) return;
@@ -164,8 +164,7 @@ namespace RWAI {
 				record = running.Elapsed.Minutes+1 > recorded;
 			}
 #if !USERCONTROL
-			// TODO
-			//else record = false;
+			else record = false;
 #endif
 			if(justSucceeded)   WriteIPC("-S\n");
 			else if(goal != -1) WriteIPC("-X\n");

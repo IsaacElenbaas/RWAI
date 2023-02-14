@@ -10,19 +10,16 @@ extern "C" {
 
 using namespace mlpack;
 
+// DISABLE MODEL LOADING if you change this
+// it will very much not fail gracefully, docs saying it will be only applies to the file being corrupted or smth
 #define     room_index 0
 #define pathfind_index     room_index+ room_vision*room_vision+2 // vision, underwater, zero-g
 #define    world_index pathfind_index+ 2*4+1 // 5, 10, 20, goal, dist to goal
 //#define      pos_index    world_index+ 2+creature_vision*creature_vision+food_vision*food_vision+itemVision*itemVision // cycle times, creatures/food/items
 #define      pos_index    world_index
 #define   player_index      pos_index+ 2+2 // pos, pos on block, velocity
-// TODO: broken
-//       I hit a magic number or something, changing input_length at all kills things
-//       played with it for two hours now, giving up for a bit
-//       really want input history though
-//#define    input_index   player_index+ 10+25+2+2*(1+4+1)+(1+4) // misc. player info
-//#define   input_length    input_index+ 2+5*input_memory // average speed and previous inputs
-#define   input_length   player_index+ 10+25+2+2*(1+4+1)+(1+4) // misc. player info
+#define    input_index   player_index+ 10+25+2+2*(1+4+1)+(1+4) // misc. player info
+#define   input_length    input_index+ 2+5*input_memory // average speed and previous inputs
 
 // mlpack breaks with c++20 so abuse mutexes instead of using binary_semaphores
 std::mutex has_data;
@@ -34,7 +31,7 @@ class RWAI {
 	public:
 		class State {
 			public:
-				State() : /*input_history(5*input_memory, arma::fill::zeros),*/ data(input_length) {
+				State() : input_history(5*input_memory, arma::fill::zeros), data(input_length) {
 					average_speed(0);
 				}
 
@@ -119,7 +116,8 @@ class RWAI {
 					for(int i = 0; i < 25; i++) {
 						data[player_index+10+i] = (i == animation) ? 1 : 0;
 					}
-					data[player_index+10+25+0] = air_in_lungs;
+					// causes problems
+					data[player_index+10+25+0] = std::max(0.0f, std::max(1.0f, air_in_lungs));
 					data[player_index+10+25+1] = object_in_stomach;
 					for(int i = 0; i < 2; i++) {
 						data[player_index+10+25+2+i*(1+4+1)+0] = hand[i];
@@ -137,10 +135,10 @@ class RWAI {
 	}/*}}}*/
 
 	/*{{{ input history*/{
-					//data[input_index] = 0; //average_speed.mean();
-					//for(int i = 0; i < 5*input_memory; i++) {
-					//	data[input_index+1+i] = 0; //input_history[i];
-					//}
+					data[input_index] = 0; //average_speed.mean();
+					for(int i = 0; i < 5*input_memory; i++) {
+						data[input_index+1+i] = 0; //input_history[i];
+					}
 	}/*}}}*/
 
 	/*{{{ check for bad data*/
@@ -158,8 +156,8 @@ class RWAI {
 								std::cout << "Bad data in world section";
 							else if(i < player_index)
 								std::cout << "Bad data in pos section";
-							//else if(i < input_index)
-							//	std::cout << "Bad data in player section";
+							else if(i < input_index)
+								std::cout << "Bad data in player section";
 							else
 								std::cout << "Bad data in input history section";
 							std::cout << ": " << data[i] << " at " << i << std::endl;
@@ -194,32 +192,32 @@ class RWAI {
 			inputs = action.action;
 			has_inputs.unlock();
 			next_state.update();
-			//for(int i = 5; i < 5*input_memory; i++) {
-			//	next_state.input_history[i] = state.input_history[i-5];
-			//}
-			//next_state.input_history[0] = (((action.action & (1 << 0)) != 0) ? 1 : 0)-(((action.action & (1 << 1)) != 0) ? 1 : 0);
-			//next_state.input_history[1] = (((action.action & (1 << 2)) != 0) ? 1 : 0)-(((action.action & (1 << 3)) != 0) ? 1 : 0);
-			//next_state.input_history[2] = ((action.action & (1 << 4)) != 0) ? 1 : 0;
-			//next_state.input_history[3] = ((action.action & (1 << 5)) != 0) ? 1 : 0;
-			//next_state.input_history[4] = ((action.action & (1 << 6)) != 0) ? 1 : 0;
+			for(int i = 5; i < 5*input_memory; i++) {
+				next_state.input_history[i] = state.input_history[i-5];
+			}
+			next_state.input_history[0] = (((action.action & (1 << 0)) != 0) ? 1 : 0)-(((action.action & (1 << 1)) != 0) ? 1 : 0);
+			next_state.input_history[1] = (((action.action & (1 << 2)) != 0) ? 1 : 0)-(((action.action & (1 << 3)) != 0) ? 1 : 0);
+			next_state.input_history[2] = ((action.action & (1 << 4)) != 0) ? 1 : 0;
+			next_state.input_history[3] = ((action.action & (1 << 5)) != 0) ? 1 : 0;
+			next_state.input_history[4] = ((action.action & (1 << 6)) != 0) ? 1 : 0;
 			if(exiting) return 0;
 
 			if(exiting || next_state.died || (max_steps != 0 && steps_performed >= max_steps))
-				return -1000*(abs(goal_x-block_x)+abs(goal_y-block_y));
+				return -(100-std::min(100, abs(goal_x-block_x)+abs(goal_y-block_y)));
 			if(state.succeeded)
-				return 1000+9000*(1-steps_performed/(60.0*40));
+				return -(100+900*(1-steps_performed/(60.0*40)));
 			float speed  = std::min(1.0f, fabs(vel_x)/100);
 			      speed += std::min(1.0f, fabs(vel_y)/100);
-			//next_state.average_speed(speed/2);
-			//// give a more current average speed
-			//if(steps_performed%10 == 0) {
-			//	double last = next_state.average_speed.mean();
-			//	next_state.average_speed.reset();
-			//	for(int i = 0; i < 5; i++) { next_state.average_speed(last); }
-			//}
+			next_state.average_speed(speed/2);
+			// give a more current average speed
+			if(steps_performed%10 == 0) {
+				double last = next_state.average_speed.mean();
+				next_state.average_speed.reset();
+				for(int i = 0; i < 5; i++) { next_state.average_speed(last); }
+			}
 			// don't constantly reward for getting closer because that screws with pathfinding
 			// could reward for following given path but if it can find its own better ways I would prefer it did that
-			return speed;
+			return -speed;
 		}
 		double Sample(const State& state, const Action& action) {
 			State next_state;
@@ -286,14 +284,16 @@ static void AI_thread() {
 	config.StepLimit() = 0;
 
 	QLearning<RWAI, decltype(model), ens::AdamUpdate, decltype(policy)> agent(config, model, policy, replay_method);
+	// if model changed this will throw very confusing and stupid errors *later*
 	data::Load("model.bin", "model", model.Parameters());
 	arma::running_stat<double> average_return;
 	for(int i = 1; ; i = (i+1)%60) {
 		average_return(agent.Episode());
 		if(i == 0) data::Save("model.bin", "model", model.Parameters());
 		if(exiting) break;
-		std::cout << "Average return: " << average_return.mean() << std::endl;
+		std::cout << "Average return: " << -average_return.mean() << std::endl;
 	}
+	data::Save("model.bin", "model", model.Parameters());
 }
 /*}}}*/
 
