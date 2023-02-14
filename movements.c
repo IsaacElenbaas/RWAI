@@ -18,15 +18,47 @@ for(int movement_index = 0; !done; movement_index++) {
 	possible_x = block2->x;
 	possible_y = block2->y;
 	possible_cost = 1;
-	if(possible_y < room_water_level) {
-		// TODO: any direction and boosting out of water
-		printf("ERR: underwater\n");
-		done = true;
-	}
-	else if(room_zerog) {
-		// TODO - don't bother giving directions other than goal?
-		printf("ERR: zero-g\n");
-		done = true;
+	//if(possible_y < room_water_level) {
+	//	// TODO: boosting out of water
+	//	done = true;
+	//}
+	if(possible_y < room_water_level || room_zerog) {
+		switch(movement_index) {
+			case 0:
+				possible_x += -1;
+				possible_y += -1;
+				break;
+			case 1:
+				possible_x +=  0;
+				possible_y += -1;
+				break;
+			case 2:
+				possible_x +=  1;
+				possible_y += -1;
+				break;
+			case 3:
+				possible_x += -1;
+				possible_y +=  0;
+				break;
+			case 4:
+				possible_x +=  1;
+				possible_y +=  0;
+				break;
+			case 5:
+				possible_x += -1;
+				possible_y +=  1;
+				break;
+			case 6:
+				possible_x +=  0;
+				possible_y +=  1;
+				break;
+			case 7:
+				possible_x +=  1;
+				possible_y +=  1;
+				break;
+			default:
+				done = true;
+		}
 	}
 	// TODO: train giving no path half? of the time so it learns to move based on end goal direction and terrain faster
 	else {

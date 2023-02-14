@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "pathfind.h"
+#include "RWAI.h"
 
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
@@ -19,9 +19,9 @@ typedef struct Block {
 	struct Block* next;
 } Block;
 
-Block* blocks = NULL;
-int blocks_len = 0;
-Block* explore;
+static Block* blocks = NULL;
+static int blocks_len = 0;
+static Block* explore;
 
 void pathfind_init() {
 	if(room_w*room_h > blocks_len) {
@@ -44,7 +44,7 @@ void pathfind_init() {
 	goal->next = NULL;
 }
 
-void update_dist_left(Block* block, int x, int y) {
+static void update_dist_left(Block* block, int x, int y) {
 	if(y <= block->y) block->dist_left = (block->y-y)+abs(block->x-x);
 	else {
 		int dx = abs(block->x-x);
@@ -53,19 +53,23 @@ void update_dist_left(Block* block, int x, int y) {
 	}
 }
 
-void update_total(Block* block) {
+static void update_total(Block* block) {
 	block->total = block->dist_to+block->dist_left;
 }
 
-// TODO: give with dist=5, dist=10, dist=15, goal
-//       make dist by cost rounding up not steps
-void pathfind(int x, int y, int dist) {
-	if(x < 0 || x >= room_w || y < 0 || y >= room_h) return;
+// TODO: make dist by cost rounding up not steps
+void pathfind(int x, int y, int dist, int* out_x, int* out_y) {
+	if(x < 0 || x >= room_w || y < 0 || y >= room_h) {
+		*out_x = 0;
+		*out_y = 0;
+		return;
+	}
 	Block* block = &blocks[y*room_w+x];
 	if(block->to_goal == NULL) {
 		if(explore == NULL) {
-			// TODO - no path
-			printf("No path!\n");
+			if(dist == 0) return;
+			*out_x = 0;
+			*out_y = 0;
 			return;
 		}
 		// update totals of seen Blocks
@@ -99,8 +103,9 @@ void pathfind(int x, int y, int dist) {
 
 		while(block->to_goal == NULL) {
 			if(explore == NULL) {
-				// TODO - no path
-				printf("No path!\n");
+				if(dist == 0) return;
+				*out_x = 0;
+				*out_y = 0;
 				return;
 			}
 			Block* block2 = explore;
@@ -162,5 +167,6 @@ void pathfind(int x, int y, int dist) {
 	} printf("\n"); //*/
 	if(dist == 0) return;
 	for(int i = 0; i < dist; i++) { block = block->to_goal; }
-	// TODO: set output pointers
+	*out_x = block->x;
+	*out_y = block->y;
 }

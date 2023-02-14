@@ -1,11 +1,12 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "pathfind.h"
+#include "RWAI.h"
 
 // all messages must be able to fit in a buffer
 #define BUFSIZE 64*1024
@@ -14,17 +15,12 @@
 // give player velocity (capped and normalized? log scale?)
 // use -1 to 1 where applicable, 0 means not impacting anything
 //
-// treat pipe paths and pipe entrances as air
 // poles as their own input
 // air is 1, slope is 0.5, solid is 0
 // give whether can see space
-// give position on block 0-1
 // with N rocks or whatever, randomize between inputs
 // give underwater (by room water height), 0g flags
-// for each enemy or bodyChunk or whatever I give it give whether there is line-of-sight to it
 // slowly reward it at all times for having items in hand
-//   https://github.com/Dark-Gran/KarmaAppetite_SpearPull/blob/master/SpearSkills/patch_Player.cs
-// see https://github.com/casheww/RW-Bioengineering/tree/master/SmallEel for in-game pathfinding implementation
 // see https://github.com/casheww/RW-SlugBrain
 // give distance to desired pipe? (normalize or no?)
 // I'm thinking do some small amount of pathfinding and give points along path in increments, along with a flag of whether to consider that (so can disable to just hunt)
@@ -36,6 +32,8 @@
 // the SetKillTag method that sets the killTag to the killer and sets the killTagCounter to the larger value of itself or 200, is also called by explosion.update, flarebomb.update, and a few others
 //
 // give percent full, reward for eating, can be a lot as it will max out for the cycle?
+/*{{{ AI variables*/
+bool died = false, succeeded = false, exiting = false;
 int* room = NULL;
 int room_w;
 int room_h;
@@ -43,6 +41,28 @@ int room_water_level;
 int room_zerog;
 int goal_x;
 int goal_y;
+int cycle_length;
+int cycle_elapsed;
+int block_x;
+int block_y;
+float block_pos_x;
+float block_pos_y;
+float vel_x;
+float vel_y;
+int body_mode;
+int animation;
+float air_in_lungs;
+int object_in_stomach;
+int hand[2];
+int hand_type[2];
+int hand_swallowable[2];
+int item;
+int item_type;
+int food_empty;
+int creatures[creature_vision*creature_vision];
+bool food[food_vision*food_vision];
+int items[item_vision*item_vision];
+/*}}}*/
 
 int main(int argc, char* argv[]) {
 	struct sockaddr_in addr;
@@ -58,41 +78,22 @@ int main(int argc, char* argv[]) {
 	int length;
 	size_t from_last = 0;
 
-/*{{{ AI variables*/
 	int room_length = 0;
 	char* room_name = malloc((20+1)*sizeof(char));
 	char* last_room_name = malloc((20+1)*sizeof(char));
 	room_name[0] = '\0';
-	int cycle_length;
-	int cycle_elapsed;
-	int block_x;
-	int block_y;
-	float block_pos_x;
-	float block_pos_y;
-	float vel_x;
-	float vel_y;
-	int body_mode;
-	int animation;
-	float air_in_lungs;
-	int object_in_stomach;
-	int hand[2];
-	int hand_type[2];
-	int hand_swallowable[2];
-	int item;
-	int item_type;
-	int food_empty;
-/*}}}*/
 
+	AI_init();
 	while((length = recv(sockfd, buffer+from_last*sizeof(char), BUFSIZE-from_last-1, 0))) {
 		buffer[from_last+length] = '\0';
 		char* i = buffer;
 		char* j;
 		while((j = strchr(i, '\n'))) {
-			// does not include newline
-			//write(1, i, (int)((j-i)/sizeof(char)));
+			//write(1, i, (int)((j-i)/sizeof(char))+1);
 			i += sizeof(char);
 			switch(*(i-sizeof(char))) {
 				case 'R':
+					// TODO: here or in mod somehow end round and let know that didn't die
 					char* temp = last_room_name;
 					last_room_name = room_name;
 					room_name = temp;
@@ -135,7 +136,7 @@ int main(int argc, char* argv[]) {
 						pathfind_init();
 						// TODO: make this return bool, if not reachable send back to reroll
 						//       or maybe if not reachable check total reachable nodes and if low then reroll (teleported into box)
-						pathfind(exit_x, exit_y, 0);
+						pathfind(exit_x, exit_y, 0, NULL, NULL);
 					}
 					break;
 				case 'T':
@@ -175,20 +176,52 @@ int main(int argc, char* argv[]) {
 				case 'C':
 					if(*i == '-') break;
 					i += sizeof(char);
-					// TODO
+					for(int j = 0; j < creature_vision*creature_vision; j++) {
+						sscanf(i, "%1d", &creatures[j]);
+						i += sizeof(char);
+					}
+					/*for(int j = creature_vision-1; j >= 0; j--) {
+						for(int k = 0; k < creature_vision; k++) {
+							printf("%d", creatures[j*creature_vision+k]);
+						} printf("\n");
+					} printf("\n"); //*/
 					break;
 				case 'F':
 					if(*i == '-') break;
 					i += sizeof(char);
-					// TODO
+					for(int j = 0; j < food_vision*food_vision; j++) {
+						food[j] = *i == '1';
+						i += sizeof(char);
+					}
+					/*for(int j = food_vision-1; j >= 0; j--) {
+						for(int k = 0; k < food_vision; k++) {
+							printf("%d", food[j*food_vision+k]);
+						} printf("\n");
+					} printf("\n"); //*/
 					break;
 				case 'I':
 					if(*i == '-') break;
 					i += sizeof(char);
-					// TODO
+					for(int j = 0; j < item_vision*item_vision; j++) {
+						sscanf(i, "%1d", &items[j]);
+						i += sizeof(char);
+					}
+					/*for(int j = item_vision-1; j >= 0; j--) {
+						for(int k = 0; k < item_vision; k++) {
+							printf("%d", items[j*item_vision+k]);
+						} printf("\n");
+					} printf("\n"); //*/
 					break;
 				case '-':
-					pathfind(block_x, block_y, 1);
+					//pathfind(block_x, block_y, 0, NULL, NULL);
+					if(*i == 'X') died = true;
+					else if(*i == 'S') succeeded = true;
+					int inputs = has_data_get_inputs();
+					char inputs_string[3+1+1];
+					sprintf(inputs_string, "%3d\n", inputs);
+					send(sockfd, inputs_string, strlen(inputs_string), 0);
+					died = false;
+					succeeded = false;
 					break;
 				case 'D':
 					write(1, i, (int)((j-i)/sizeof(char))+1);
@@ -202,5 +235,7 @@ int main(int argc, char* argv[]) {
 		}
 		else from_last = 0;
 	}
+	exiting = true;
+	AI_exit();
 	return 0;
 }

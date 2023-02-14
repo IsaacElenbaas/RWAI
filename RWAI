@@ -3,6 +3,13 @@
 set -e
 make
 [ -z "$1" ] && {
-	./video | ffmpeg -y -i - -r 40 -preset ultrafast test.mp4 &>/dev/null &
+	./video > /dev/null &
+	#./video | ffmpeg -y -framerate 40 -i - -r 40 -preset ultrafast test.mp4 &>/dev/null &
+	#./video | \
+	#	ffmpeg -framerate 40 -i - -r 40 -preset ultrafast -vcodec libx264 -pix_fmt yuv420p -f flv - 2>/dev/null | \
+	#	mbuffer -m 32M -s 128K -q | \
+	#	ffmpeg -re -f flv -i - -f flv "rtmp://ord03.contribute.live-video.net/app/$(cat key)?bandwidthtest=true" &>/dev/null &
 }
-./AI
+steam -silent steam://run/312520 &>/dev/null & disown
+# https://github.com/mlpack/mlpack/issues/1858
+OMP_WAIT_POLICY=passive GOMP_SPINCOUNT=0 NVBLAS_CONFIG_FILE="nvblas.conf" ./AI

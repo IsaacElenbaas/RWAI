@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
 	sockfd = accept(sockfd, (struct sockaddr*)&addr, &addrlen);
 	char buffer[BUFSIZE];
 	int length;
-	while(length = recv(sockfd, buffer, BUFSIZE, 0)) {
+	while((length = recv(sockfd, buffer, BUFSIZE, 0))) {
 		write(1, buffer, length);
 	}
 	return 0;

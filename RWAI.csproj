@@ -304,6 +304,9 @@
 
 	<ItemGroup>
 		<Compile Include="RWAI.cs" />
+		<Compile Include="RWAI-video.cs" />
+		<Compile Include="RWAI-helper.cs" />
+		<Compile Include="RWAI-data.cs" />
 	</ItemGroup>
 	<ItemGroup>
 		<None Include="Mod\modinfo.json" />
